@@ -31,13 +31,16 @@ import { FlagStatusChip } from '@/components/FlagStatusChip'
 const actionLabel: Record<string, string> = {
   created: '创建',
   updated: '更新',
-  submitted: '提交评审',
-  approved: '批准',
-  rejected: '驳回',
+  submitted: '送审固化',
+  approved: '批准版本',
+  rejected: '驳回版本',
   frozen: '冻结',
   unfrozen: '解冻',
   'rolled-back': '回滚',
   'rollout-adjusted': '调整灰度',
+  superseded: '送审版本作废',
+  'approval-invalidated': '批准失效退回重审',
+  'revision-confirmed': '旧开关待确认版本',
 }
 
 export function AuditPage() {
@@ -130,7 +133,10 @@ export function AuditPage() {
                 return (
                   <TableRow key={event.id} hover>
                     <TableCell>
-                      <Typography variant="body2" fontWeight={700}>{actionLabel[event.action] ?? event.action}</Typography>
+                      <Typography variant="body2" fontWeight={700}>
+                        {event.revisionVersion ? <Chip size="small" label={`v${event.revisionVersion}`} variant="outlined" sx={{ mr: 0.7 }} /> : null}
+                        {actionLabel[event.action] ?? event.action}
+                      </Typography>
                       <Typography variant="caption" color="text.secondary">
                         {event.createdAt.slice(0, 16).replace('T', ' ')} · {event.actor}
                       </Typography>
@@ -172,7 +178,9 @@ export function AuditPage() {
       <Dialog open={Boolean(selectedFlag)} onClose={() => setSelectedFlagId('')} fullWidth maxWidth="sm">
         <DialogTitle>回滚 {selectedFlag?.name}</DialogTitle>
         <DialogContent dividers>
-          <Alert severity="error" sx={{ mb: 2 }}>回滚会关闭生产开关、停止灰度并写入审计日志。</Alert>
+          <Alert severity="error" sx={{ mb: 2 }}>
+            人工回滚会关闭开关、灰度归零，并恢复最近一次已批准版本的受众、依赖与回滚边界，全程写入审计日志。
+          </Alert>
           <TextField
             label="回滚原因"
             multiline

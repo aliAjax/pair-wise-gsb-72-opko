@@ -27,7 +27,11 @@ import ArrowBackIcon from '@mui/icons-material/ArrowBack'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useGetAuditQuery, useGetFlagQuery, useGetFlagsQuery, useSaveFlagMutation, useSubmitForReviewMutation } from '@/services/flagApi'
 import { FlagStatusChip } from '@/components/FlagStatusChip'
+import { RevisionBadge } from '@/components/RevisionBadge'
+import { BoundaryDiff } from '@/components/RevisionDiff'
 import { DependencyGraph } from '@/components/DependencyGraph'
+import { boundaryFingerprint } from '@/services/revisions'
+import { actionableRevision, approvedRevision, formatRevisionTime, invalidatedRevision } from '@/services/revisionUtils'
 import type { AudienceRule, Dependency, FeatureFlag, RuleOperator, RolloutStep } from '@/types'
 
 const now = new Date().toISOString()
@@ -51,6 +55,7 @@ const emptyFlag = (): FeatureFlag => ({
   metricNames: [],
   deadCodeStatus: 'candidate',
   rolloutSteps: [],
+  revisions: [],
   createdAt: now,
   updatedAt: now,
   lastChangedBy: '林默',
@@ -80,6 +85,23 @@ export function FlagEditorPage() {
   const [saveFlag, saveState] = useSaveFlagMutation()
   const [submitReview, submitState] = useSubmitForReviewMutation()
   const activeFlag = savedFlag ?? draft
+
+  const openRevision = actionableRevision(activeFlag)
+  const liveRevision = approvedRevision(activeFlag)
+  const invalidRevision = invalidatedRevision(activeFlag)
+  const flagNameById = useMemo(
+    () => new Map(allFlags.map((flag) => [flag.id, `${flag.name} · ${flag.key}`])),
+    [allFlags],
+  )
+  const revisionHistory = useMemo(
+    () => (activeFlag.revisions ? [...activeFlag.revisions].reverse() : []),
+    [activeFlag.revisions],
+  )
+  /** 草稿相对存储版本是否动了受保护边界 */
+  const boundaryDirty = useMemo(() => {
+    if (isNew || !existing) return false
+    return boundaryFingerprint(existing) !== boundaryFingerprint(draft)
+  }, [draft, existing, isNew])
 
   useEffect(() => {
     if (existing) setDraft(existing)
@@ -133,8 +155,11 @@ export function FlagEditorPage() {
     try {
       await submitReview({ id: saved.id, actor: saved.lastChangedBy }).unwrap()
       navigate('/review')
-    } catch {
-      setErrors(['提交评审失败，请稍后重试'])
+    } catch (error) {
+      const detail = error && typeof error === 'object' && 'data' in error
+        ? ((error as { data?: { message?: string } }).data?.message ?? '提交评审失败，请稍后重试')
+        : '提交评审失败，请稍后重试'
+      setErrors([detail])
     }
   }
 
@@ -216,9 +241,11 @@ export function FlagEditorPage() {
             variant="contained"
             startIcon={<SendOutlinedIcon />}
             loading={submitState.isLoading}
+            disabled={Boolean(openRevision)}
+            title={openRevision ? `v${openRevision.version} 仍在评审中，请先处理再重新送审` : undefined}
             onClick={() => void handleSubmit()}
           >
-            提交影响评审
+            {openRevision ? '已有版本待评审' : '提交影响评审'}
           </Button>
         </Stack>
       </Box>
@@ -230,6 +257,23 @@ export function FlagEditorPage() {
               {error}
             </Typography>
           ))}
+        </Alert>
+      )}
+
+      {!isNew && invalidRevision && (
+        <Alert severity="error" sx={{ mb: 2 }}>
+          已批准的 v{invalidRevision.version} 因灰度期间修改受众、依赖或回滚边界而失效，运行流量停在 {existing?.rolloutPercentage ?? 0}%。
+          保存草稿后请重新「提交影响评审」，评审通过的才是包含本次修改的新版本。
+        </Alert>
+      )}
+      {!isNew && !invalidRevision && openRevision && boundaryDirty && (
+        <Alert severity="warning" sx={{ mb: 2 }}>
+          送审版本 v{openRevision.version} 尚未评审。保存对受众、依赖或回滚边界的修改会让该版本立即作废，需要重新送审；批准人只能批准重新固化的那一版。
+        </Alert>
+      )}
+      {!isNew && !invalidRevision && !openRevision && liveRevision && boundaryDirty && (
+        <Alert severity="warning" sx={{ mb: 2 }}>
+          当前按已批准的 v{liveRevision.version} 运行。保存受众、依赖或回滚边界的修改后旧批准立即失效、退回重审，灰度停在 {existing?.rolloutPercentage ?? 0}%，由人工回滚可恢复已批准版本。
         </Alert>
       )}
 
@@ -258,13 +302,7 @@ export function FlagEditorPage() {
                 <MenuItem value="staging">预发</MenuItem>
                 <MenuItem value="production">生产</MenuItem>
               </TextField>
-              <TextField select label="状态" value={draft.status} onChange={(event) => update('status', event.target.value as FeatureFlag['status'])}>
-                <MenuItem value="draft">草稿</MenuItem>
-                <MenuItem value="review">待评审</MenuItem>
-                <MenuItem value="active">已发布</MenuItem>
-                <MenuItem value="frozen">已冻结</MenuItem>
-                <MenuItem value="rolled-back">已回滚</MenuItem>
-              </TextField>
+              <TextField label="当前状态" value={draft.status} disabled helperText="状态由送审与评审流转驱动，不能手工改为已发布" />
             </Box>
             <TextField
               label="业务说明"
@@ -522,13 +560,51 @@ export function FlagEditorPage() {
 
         {tab === 4 && (
           <CardContent className="editor-panel">
+            <Typography variant="h3" sx={{ mb: 1 }}>送审版本（不可变）</Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+              每次送审固化当时的受众、依赖与回滚边界；版本内容不再随草稿修改。
+            </Typography>
+            <Box className="revision-history" sx={{ mb: 3 }}>
+              {revisionHistory.map((revision) => (
+                <Box key={revision.id} className="revision-history-item">
+                  <Stack spacing={0.8}>
+                    <RevisionBadge revision={revision} />
+                    <Typography variant="caption" color="text.secondary">
+                      {revision.submittedBy} · {formatRevisionTime(revision.submittedAt)}
+                    </Typography>
+                    {revision.reviewedBy && (
+                      <Typography variant="caption" color="text.secondary">
+                        {revision.reviewedBy} 于 {formatRevisionTime(revision.reviewedAt ?? '')} 评审
+                      </Typography>
+                    )}
+                  </Stack>
+                  <Box>
+                    <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 0.5 }}>
+                      边界指纹 {revision.boundaryHash} · 固化灰度 {revision.snapshot.rolloutPercentage}%
+                    </Typography>
+                    {revision.changes.length > 0 ? (
+                      <BoundaryDiff changes={revision.changes} flagNameById={flagNameById} />
+                    ) : (
+                      <Typography variant="body2" color="text.secondary">首个送审版本，无相对变化。</Typography>
+                    )}
+                  </Box>
+                </Box>
+              ))}
+              {revisionHistory.length === 0 && (
+                <Typography className="empty-state">尚未送审，提交影响评审后会生成不可变版本。</Typography>
+              )}
+            </Box>
+
+            <Divider sx={{ mb: 2 }} />
             <Typography variant="h3" sx={{ mb: 2 }}>配置审计记录</Typography>
             <Box className="audit-timeline">
               {audit.map((event) => (
                 <Box className="audit-event" key={event.id}>
                   <Box className="audit-dot" />
                   <Box>
-                    <Typography variant="body2" fontWeight={700}>{event.summary}</Typography>
+                    <Typography variant="body2" fontWeight={700}>
+                      {event.revisionVersion ? `v${event.revisionVersion} · ` : ''}{event.summary}
+                    </Typography>
                     <Typography variant="caption" color="text.secondary">
                       {event.actor} · {event.createdAt.slice(0, 16).replace('T', ' ')}
                     </Typography>

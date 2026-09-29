@@ -9,6 +9,17 @@ export type IssueCategory =
   | 'overlap'
   | 'client-compatibility'
 
+/** 送审版本的生命周期状态：送审后内容不可变 */
+export type RevisionStatus =
+  | 'pending' // 已送审、等待评审
+  | 'approved' // 评审通过、当前生效（或曾生效）
+  | 'rejected' // 评审驳回
+  | 'superseded' // 送审后、批准前配置被改，本版本已被新草稿取代
+  | 'invalidated' // 批准且灰度开始后配置被改，旧批准失效、退回重审
+  | 'pending-confirmation' // 旧开关首次启用，等待补确认的历史版本
+
+export type RevisionBoundaryKey = 'audienceRules' | 'dependencies' | 'rollbackConditions'
+
 export interface AudienceRule {
   id: string
   attribute: string
@@ -30,6 +41,51 @@ export interface Dependency {
   flagId: string
   type: 'requires' | 'conflicts' | 'fallback'
   condition: string
+}
+
+/** 送审边界相对上一版本的结构化差异 */
+export interface ConfigChange {
+  boundary: RevisionBoundaryKey
+  label: string
+  added: string[]
+  removed: string[]
+}
+
+/** 送审瞬间固化的全量配置快照，回滚时按它恢复 */
+export interface RevisionSnapshot {
+  enabled: boolean
+  rolloutPercentage: number
+  audienceRules: AudienceRule[]
+  regions: string[]
+  minClientVersion: Record<Environment, string>
+  dependencies: Dependency[]
+  rollbackConditions: string[]
+  metricNames: string[]
+  deadCodeStatus: FeatureFlag['deadCodeStatus']
+  rolloutSteps: RolloutStep[]
+}
+
+/** 一次送审对应一个不可变版本 */
+export interface ReleaseRevision {
+  id: string
+  flagId: string
+  version: number
+  status: RevisionStatus
+  /** 送审时的受众、依赖、回滚边界内容指纹（8 位） */
+  boundaryHash: string
+  /** 送审人（旧开关待确认版本为系统） */
+  submittedBy: string
+  submittedAt: string
+  /** 批准人 / 驳回人 */
+  reviewedBy?: string
+  reviewedAt?: string
+  reviewComment?: string
+  /** 批准时附带的冻结策略 */
+  freezeUntil?: string
+  /** 相对上一送审版本的边界变化；首个版本为空 */
+  changes: ConfigChange[]
+  /** 送审时固化的全量配置，任何时候都不随草稿修改 */
+  snapshot: RevisionSnapshot
 }
 
 export interface FeatureFlag {
@@ -54,6 +110,8 @@ export interface FeatureFlag {
   createdAt: string
   updatedAt: string
   lastChangedBy: string
+  /** 每次送审固化的不可变版本，按版本号升序 */
+  revisions: ReleaseRevision[]
 }
 
 export interface AuditEvent {
@@ -70,12 +128,18 @@ export interface AuditEvent {
     | 'unfrozen'
     | 'rolled-back'
     | 'rollout-adjusted'
+    | 'superseded'
+    | 'approval-invalidated'
+    | 'revision-confirmed'
   actor: string
   summary: string
   before?: string
   after?: string
   affectedUsers: number
   createdAt: string
+  /** 关联的不可变送审版本 */
+  revisionId?: string
+  revisionVersion?: number
 }
 
 export interface ImpactIssue {
@@ -112,4 +176,6 @@ export interface ReviewPayload {
   decision: 'approved' | 'rejected'
   comment: string
   freezeUntil?: string
+  /** 必须明确批准的送审版本；只允许批准自己看到的那一版 */
+  revisionId?: string
 }

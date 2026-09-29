@@ -22,8 +22,12 @@ import {
 import PlayArrowOutlinedIcon from '@mui/icons-material/PlayArrowOutlined'
 import UndoOutlinedIcon from '@mui/icons-material/UndoOutlined'
 import PauseCircleOutlineIcon from '@mui/icons-material/PauseCircleOutline'
+import LockOutlinedIcon from '@mui/icons-material/LockOutlined'
 import { useGetFlagsQuery, useRollbackFlagMutation, useSaveFlagMutation } from '@/services/flagApi'
 import { FlagStatusChip } from '@/components/FlagStatusChip'
+import { RevisionBadge } from '@/components/RevisionBadge'
+import { BoundaryDiff, RevisionSnapshotView } from '@/components/RevisionDiff'
+import { actionableRevision, approvedRevision, invalidatedRevision, lastApprovedRevision } from '@/services/revisionUtils'
 
 export function RolloutPage() {
   const { data: flags = [], isLoading } = useGetFlagsQuery({})
@@ -40,9 +44,17 @@ export function RolloutPage() {
 
   const flag = flags.find((item) => item.id === selectedId)
   const currentStepIndex = flag?.rolloutSteps.findIndex((step) => step.status === 'running') ?? -1
+  const approved = approvedRevision(flag)
+  const openRevision = actionableRevision(flag)
+  const invalid = invalidatedRevision(flag)
+  const restorable = lastApprovedRevision(flag)
+  const awaitingApproval = Boolean(openRevision)
+  const flagNameById = new Map(flags.map((item) => [item.id, `${item.name} · ${item.key}`]))
+  /** 只有批准仍有效时才能推进 / 冻结；批准失效后运行阶段停在原流量 */
+  const canOperate = Boolean(flag && approved && !invalid && !awaitingApproval)
 
   const advanceRollout = async () => {
-    if (!flag) return
+    if (!flag || !canOperate) return
     const steps = flag.rolloutSteps.map((step, index) => ({
       ...step,
       status:
@@ -63,14 +75,14 @@ export function RolloutPage() {
         status: 'active',
         lastChangedBy: '林默',
       }).unwrap()
-      setMessage(`灰度已推进至 ${nextPercentage}%，新的回滚边界已保存`)
+      setMessage(`灰度已按已批准版本 v${approved?.version} 推进至 ${nextPercentage}%`)
     } catch {
       setMessage('推进失败，请检查配置后重试')
     }
   }
 
   const pauseRollout = async () => {
-    if (!flag) return
+    if (!flag || !canOperate) return
     try {
       await saveFlag({
         ...flag,
@@ -80,7 +92,7 @@ export function RolloutPage() {
           step.status === 'running' ? { ...step, status: 'paused' } : step,
         ),
       }).unwrap()
-      setMessage('灰度流量已冻结，现有用户继续使用当前配置')
+      setMessage('灰度流量已冻结，现有用户继续使用已批准版本配置')
     } catch {
       setMessage('冻结失败，请重试')
     }
@@ -95,7 +107,7 @@ export function RolloutPage() {
       await rollbackFlag({ id: flag.id, actor: '林默', reason }).unwrap()
       setRollbackOpen(false)
       setReason('')
-      setMessage('已完成回滚，开关关闭并写入审计日志')
+      setMessage(restorable ? `已回滚并恢复已批准版本 v${restorable.version}，灰度归零` : '已完成回滚，开关关闭并写入审计日志')
     } catch {
       setMessage('回滚失败，请重试')
     }
@@ -107,7 +119,7 @@ export function RolloutPage() {
         <Box>
           <Typography variant="h2">灰度发布时间线</Typography>
           <Typography color="text.secondary">
-            逐步放量、冻结流量或回滚生产配置，每次变化都记录影响范围与操作者。
+            只按已批准的不可变版本放量；批准失效后运行阶段停在原流量，由人工回滚恢复已批准版本。
           </Typography>
         </Box>
         <TextField
@@ -126,6 +138,20 @@ export function RolloutPage() {
 
       {flag && (
         <>
+          {invalid && (
+            <Alert severity="error" sx={{ mb: 2 }} icon={<LockOutlinedIcon fontSize="inherit" />}>
+              已批准的 v{invalid.version} 因受众、依赖或回滚边界被修改而失效。灰度已停在 {flag.rolloutPercentage}%，
+              不能继续推进；请等待新版本评审通过，或立即人工回滚恢复 v{invalid.version}。
+            </Alert>
+          )}
+          {!invalid && openRevision && (
+            <Alert severity="warning" sx={{ mb: 2 }} icon={<LockOutlinedIcon fontSize="inherit" />}>
+              {openRevision.status === 'pending-confirmation'
+                ? `旧开关首次打开生成了待确认版本 v${openRevision.version}，评审确认前仅维持当前 ${flag.rolloutPercentage}% 流量，不能继续推进。`
+                : `v${openRevision.version} 正在评审中，灰度钉在 ${flag.rolloutPercentage}%，评审通过后才能继续推进。`}
+            </Alert>
+          )}
+
           <Card sx={{ mb: 2 }}>
             <CardContent>
               <Stack direction="row" justifyContent="space-between" alignItems="flex-start" sx={{ mb: 3 }}>
@@ -133,18 +159,23 @@ export function RolloutPage() {
                   <Stack direction="row" spacing={1} alignItems="center">
                     <Typography variant="h3">{flag.name}</Typography>
                     <FlagStatusChip status={flag.status} />
+                    {approved && <RevisionBadge revision={approved} />}
+                    {invalid && <RevisionBadge revision={invalid} />}
                   </Stack>
-                  <Typography variant="caption" color="text.secondary">{flag.key} · 当前 {flag.rolloutPercentage}%</Typography>
+                  <Typography variant="caption" color="text.secondary">
+                    {flag.key} · 当前 {flag.rolloutPercentage}%
+                    {invalid ? '（已钉住，等待重审或人工回滚）' : approved ? `（按 v${approved.version} 已批准边界运行）` : ''}
+                  </Typography>
                 </Box>
                 <Stack direction="row" spacing={1}>
-                  <Button variant="outlined" startIcon={<PauseCircleOutlineIcon />} onClick={() => void pauseRollout()} disabled={saveState.isLoading || flag.status === 'frozen'}>
+                  <Button variant="outlined" startIcon={<PauseCircleOutlineIcon />} onClick={() => void pauseRollout()} disabled={saveState.isLoading || !canOperate || flag.status === 'frozen'}>
                     冻结流量
                   </Button>
-                  <Button variant="contained" startIcon={<PlayArrowOutlinedIcon />} onClick={() => void advanceRollout()} disabled={saveState.isLoading || currentStepIndex < 0 || currentStepIndex >= flag.rolloutSteps.length - 1}>
+                  <Button variant="contained" startIcon={<PlayArrowOutlinedIcon />} onClick={() => void advanceRollout()} disabled={saveState.isLoading || !canOperate || currentStepIndex < 0 || currentStepIndex >= flag.rolloutSteps.length - 1}>
                     推进下一阶段
                   </Button>
                   <Button color="error" variant="outlined" startIcon={<UndoOutlinedIcon />} onClick={() => setRollbackOpen(true)}>
-                    紧急回滚
+                    人工回滚
                   </Button>
                 </Stack>
               </Stack>
@@ -169,6 +200,21 @@ export function RolloutPage() {
           <Box className="rollout-grid">
             <Card>
               <CardContent>
+                <Typography variant="h3" sx={{ mb: 1.5 }}>
+                  {invalid ? `失效批准 v${invalid.version} 的变化` : approved ? `生效版本 v${approved.version} 固化边界` : '生效版本'}
+                </Typography>
+                {invalid ? (
+                  <BoundaryDiff changes={invalid.changes} flagNameById={flagNameById} />
+                ) : approved ? (
+                  <RevisionSnapshotView revision={approved} flagNameById={flagNameById} />
+                ) : (
+                  <Typography variant="body2" color="text.secondary">尚无已批准版本，当前不允许放量。</Typography>
+                )}
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardContent>
                 <Typography variant="h3" sx={{ mb: 1.5 }}>阶段守护指标</Typography>
                 {flag.rolloutSteps.map((step) => (
                   <Box key={step.id} className="guardrail-row">
@@ -180,31 +226,15 @@ export function RolloutPage() {
                     </Box>
                     <Chip
                       size="small"
-                      label={step.status === 'completed' ? '已通过' : step.status === 'running' ? '观察中' : step.status === 'paused' ? '已暂停' : '待执行'}
-                      color={step.status === 'completed' ? 'success' : step.status === 'running' ? 'primary' : step.status === 'paused' ? 'warning' : 'default'}
+                      label={step.status === 'completed' ? '已通过' : step.status === 'running' ? (invalid || awaitingApproval ? '已钉住' : '观察中') : step.status === 'paused' ? '已暂停' : '待执行'}
+                      color={step.status === 'completed' ? 'success' : step.status === 'running' ? (invalid || awaitingApproval ? 'error' : 'primary') : step.status === 'paused' ? 'warning' : 'default'}
                     />
                   </Box>
                 ))}
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardContent>
-                <Typography variant="h3" sx={{ mb: 1.5 }}>环境差异与客户端约束</Typography>
-                <Box className="environment-compare">
-                  {(['dev', 'staging', 'production'] as const).map((environment, index) => (
-                    <Box key={environment}>
-                      <Typography variant="caption" color="text.secondary">{environment.toUpperCase()}</Typography>
-                      <Typography className="summary-value">{index === 0 ? 100 : index === 1 ? flag.rolloutPercentage : Math.max(flag.rolloutPercentage - 20, 0)}%</Typography>
-                      <Typography variant="caption">最低 {flag.minClientVersion[environment]}</Typography>
-                    </Box>
-                  ))}
-                </Box>
-                <Alert severity="warning" sx={{ mt: 2 }}>
-                  生产环境低于最低版本的用户会走降级路径，不会命中新逻辑。
-                </Alert>
                 <Typography variant="h3" sx={{ mt: 2.5, mb: 1 }}>回滚条件</Typography>
-                {flag.rollbackConditions.map((condition) => <Typography key={condition} variant="body2">• {condition}</Typography>)}
+                {(approved?.snapshot.rollbackConditions ?? flag.rollbackConditions).map((condition) => (
+                  <Typography key={condition} variant="body2">• {condition}</Typography>
+                ))}
               </CardContent>
             </Card>
           </Box>
@@ -212,10 +242,12 @@ export function RolloutPage() {
       )}
 
       <Dialog open={rollbackOpen} onClose={() => setRollbackOpen(false)} fullWidth maxWidth="sm">
-        <DialogTitle>确认紧急回滚</DialogTitle>
+        <DialogTitle>确认人工回滚</DialogTitle>
         <DialogContent dividers>
           <Alert severity="error" sx={{ mb: 2 }}>
-            回滚会立即关闭开关、将灰度降至 0，并把所有运行中阶段标记为暂停。
+            回滚会立即关闭开关、将灰度降至 0，并恢复最近一次已批准版本
+            {restorable ? ` v${restorable.version} ` : ' '}
+            的受众、依赖与回滚边界；运行中阶段标记为暂停。
           </Alert>
           <TextField
             label="回滚原因与异常证据"

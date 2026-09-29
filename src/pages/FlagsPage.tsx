@@ -29,6 +29,8 @@ import {
 } from '@/app/uiSlice'
 import { useGetFlagsQuery } from '@/services/flagApi'
 import { FlagStatusChip } from '@/components/FlagStatusChip'
+import { RevisionBadge } from '@/components/RevisionBadge'
+import { actionableRevision, approvedRevision, invalidatedRevision } from '@/services/revisionUtils'
 import type { Environment, FlagStatus } from '@/types'
 
 const teams = ['交易体验', '增长算法', '云控制台', '支付平台', '数据平台', '增长运营', '基础架构']
@@ -139,7 +141,9 @@ export function FlagsPage() {
               </TableRow>
             </TableHead>
             <TableBody>
-              {flags?.map((flag) => (
+              {flags?.map((flag) => {
+                const revision = invalidatedRevision(flag) ?? actionableRevision(flag) ?? approvedRevision(flag)
+                return (
                 <TableRow key={flag.id} hover>
                   <TableCell>
                     <Typography component={Link} to={`/flags/${flag.id}`} fontWeight={700} variant="body2">
@@ -153,6 +157,7 @@ export function FlagsPage() {
                     <Stack spacing={0.6} alignItems="flex-start">
                       <Chip label={flag.environment.toUpperCase()} size="small" variant="outlined" />
                       <FlagStatusChip status={flag.status} />
+                      {revision && <RevisionBadge revision={revision} />}
                     </Stack>
                   </TableCell>
                   <TableCell>
@@ -188,7 +193,8 @@ export function FlagsPage() {
                     </Button>
                   </TableCell>
                 </TableRow>
-              ))}
+                )
+              })}
               {!isLoading && flags?.length === 0 && (
                 <TableRow>
                   <TableCell colSpan={7} align="center" sx={{ py: 6 }} color="text.secondary">

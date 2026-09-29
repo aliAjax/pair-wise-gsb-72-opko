@@ -756,6 +756,83 @@ a:hover {
   color: #d92d20 !important;
 }
 
+.revision-diff-group {
+  padding: 10px 12px;
+  border: 1px solid #e5e6eb;
+  border-radius: 6px;
+  background: #f7f8fa;
+}
+
+.diff-line {
+  margin-top: 4px;
+  line-height: 1.5;
+}
+
+.diff-line svg {
+  flex: 0 0 auto;
+  margin-top: 3px;
+  font-size: 15px !important;
+}
+
+.diff-added {
+  color: #0a7d3a;
+}
+
+.diff-added svg {
+  color: #00b42a;
+}
+
+.diff-removed {
+  color: #cb2634;
+}
+
+.diff-removed .MuiTypography-body2 {
+  text-decoration: line-through;
+}
+
+.diff-removed svg {
+  color: #f53f3f;
+}
+
+.revision-snapshot-group {
+  padding: 10px 12px;
+  border: 1px solid #e5e6eb;
+  border-radius: 6px;
+  background: #f7f8fa;
+}
+
+.revision-snapshot-group .MuiTypography-caption {
+  display: block;
+  margin-bottom: 4px;
+  font-weight: 700;
+}
+
+.snapshot-line {
+  line-height: 1.7;
+}
+
+.revision-comment {
+  padding: 8px 12px;
+  border-left: 3px solid #94bfff;
+  border-radius: 0 4px 4px 0;
+  background: #f2f7ff;
+}
+
+.revision-history {
+  display: grid;
+  gap: 10px;
+}
+
+.revision-history-item {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr);
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid #e5e6eb;
+  border-radius: 6px;
+  background: #f7f8fa;
+}
+
 @media (max-width: 1280px) {
   .stat-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));

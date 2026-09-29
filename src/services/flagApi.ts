@@ -2,9 +2,10 @@ import { createApi, fakeBaseQuery } from '@reduxjs/toolkit/query/react'
 import {
   applyReview,
   getDashboardStats,
+  persistFlag,
   readDatabase,
   rollbackFlag,
-  writeDatabase,
+  submitRevision,
 } from '@/services/database'
 import type {
   AuditEvent,
@@ -60,66 +61,22 @@ export const flagApi = createApi({
     saveFlag: builder.mutation<FeatureFlag, FeatureFlag>({
       async queryFn(flag) {
         await delay(260)
-        const db = readDatabase()
-        const index = db.flags.findIndex((item) => item.id === flag.id)
-        const next = { ...flag, updatedAt: new Date().toISOString() }
-        if (index >= 0) {
-          const before = db.flags[index]
-          db.flags[index] = next
-          db.audit.unshift({
-            id: `audit-${Date.now()}`,
-            flagId: flag.id,
-            flagKey: flag.key,
-            action: 'updated',
-            actor: flag.lastChangedBy,
-            summary: '更新开关受众、依赖、版本或回滚条件。',
-            before: before.status,
-            after: next.status,
-            affectedUsers: Math.round(900000 * (next.rolloutPercentage / 100)),
-            createdAt: new Date().toISOString(),
-          })
-        } else {
-          db.flags.unshift(next)
-          db.audit.unshift({
-            id: `audit-${Date.now()}`,
-            flagId: next.id,
-            flagKey: next.key,
-            action: 'created',
-            actor: next.lastChangedBy,
-            summary: '创建功能开关草稿。',
-            after: next.status,
-            affectedUsers: 0,
-            createdAt: new Date().toISOString(),
-          })
+        try {
+          return { data: persistFlag(flag) }
+        } catch (error) {
+          return { error: { message: error instanceof Error ? error.message : '保存失败' } }
         }
-        writeDatabase(db)
-        return { data: next }
       },
       invalidatesTags: ['Flags', 'Dashboard', 'Audit'],
     }),
     submitForReview: builder.mutation<FeatureFlag, { id: string; actor: string }>({
       async queryFn({ id, actor }) {
         await delay(220)
-        const db = readDatabase()
-        const flag = db.flags.find((item) => item.id === id)
-        if (!flag) return { error: { message: '功能开关不存在' } }
-        flag.status = 'review'
-        flag.updatedAt = new Date().toISOString()
-        flag.lastChangedBy = actor
-        db.audit.unshift({
-          id: `audit-${Date.now()}`,
-          flagId: id,
-          flagKey: flag.key,
-          action: 'submitted',
-          actor,
-          summary: '提交发布影响评审。',
-          before: 'draft',
-          after: 'review',
-          affectedUsers: Math.round(900000 * (flag.rolloutPercentage / 100)),
-          createdAt: new Date().toISOString(),
-        })
-        writeDatabase(db)
-        return { data: flag }
+        try {
+          return { data: submitRevision(id, actor) }
+        } catch (error) {
+          return { error: { message: error instanceof Error ? error.message : '送审失败' } }
+        }
       },
       invalidatesTags: (_result, _error, arg) => [
         'Flags',
