@@ -19,13 +19,15 @@ import { Link } from 'react-router-dom'
 import { useGetDashboardQuery, useGetFlagsQuery, useGetIssuesQuery } from '@/services/flagApi'
 import { StatCard } from '@/components/StatCard'
 import { FlagStatusChip } from '@/components/FlagStatusChip'
+import { ConfigurationStateChip } from '@/components/ConfigurationStateChip'
+import { needsReview } from '@/services/releaseVersions'
 
 export function DashboardPage() {
   const { data, isLoading } = useGetDashboardQuery()
   const { data: flags } = useGetFlagsQuery({})
   const { data: issues } = useGetIssuesQuery({ resolved: false })
 
-  const pendingFlags = flags?.filter((flag) => flag.status === 'review' || flag.status === 'frozen') ?? []
+  const pendingFlags = flags?.filter(needsReview) ?? []
   const blockerIssues = issues?.filter((issue) => issue.severity === 'blocker') ?? []
 
   return (
@@ -182,8 +184,9 @@ export function DashboardPage() {
                   {flag.key} · {flag.owner} · {flag.team}
                 </Typography>
               </Box>
-              <Chip label={`${flag.rolloutPercentage}%`} size="small" variant="outlined" />
+              <Chip label={`${flag.runtimePercentage ?? flag.rolloutPercentage}%`} size="small" variant="outlined" />
               <FlagStatusChip status={flag.status} />
+              <ConfigurationStateChip state={flag.configurationState} />
               <Button component={Link} to={`/flags/${flag.id}`} size="small">
                 审阅配置
               </Button>

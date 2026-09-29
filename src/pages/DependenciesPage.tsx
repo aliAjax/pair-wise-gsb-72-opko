@@ -20,23 +20,28 @@ import {
 import AccountTreeOutlinedIcon from '@mui/icons-material/AccountTreeOutlined'
 import EditOutlinedIcon from '@mui/icons-material/EditOutlined'
 import { Link } from 'react-router-dom'
+import type { FeatureFlag } from '@/types'
 import { useGetFlagsQuery } from '@/services/flagApi'
 import { DependencyGraph } from '@/components/DependencyGraph'
 import { FlagStatusChip } from '@/components/FlagStatusChip'
+import { getEffectiveFlag } from '@/services/releaseVersions'
+
+const effectiveFlags = (items: FeatureFlag[]) => items.map(getEffectiveFlag)
 
 export function DependenciesPage() {
   const { data: flags = [], isLoading } = useGetFlagsQuery({})
+  const runtimeFlags = effectiveFlags(flags)
   const [selectedId, setSelectedId] = useState('')
 
   useEffect(() => {
     if (!selectedId && flags.length > 0) setSelectedId(flags[0].id)
   }, [flags, selectedId])
 
-  const selectedFlag = flags.find((flag) => flag.id === selectedId)
-  const conflicts = flags.flatMap((flag) =>
+  const selectedFlag = runtimeFlags.find((flag) => flag.id === selectedId)
+  const conflicts = runtimeFlags.flatMap((flag) =>
     flag.dependencies
       .filter((dependency) => dependency.type === 'conflicts')
-      .map((dependency) => ({ source: flag, target: flags.find((item) => item.id === dependency.flagId), dependency })),
+      .map((dependency) => ({ source: flag, target: runtimeFlags.find((item) => item.id === dependency.flagId), dependency })),
   )
   const activeConflicts = conflicts.filter((item) => item.source.enabled && item.target?.enabled)
 
@@ -84,7 +89,7 @@ export function DependenciesPage() {
                 </Button>
               )}
             </Stack>
-            {selectedFlag ? <DependencyGraph selectedFlag={selectedFlag} allFlags={flags} /> : <Typography>暂无数据</Typography>}
+            {selectedFlag ? <DependencyGraph selectedFlag={selectedFlag} allFlags={runtimeFlags} /> : <Typography>暂无数据</Typography>}
           </CardContent>
         </Card>
 

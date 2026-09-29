@@ -38,6 +38,8 @@ const actionLabel: Record<string, string> = {
   unfrozen: '解冻',
   'rolled-back': '回滚',
   'rollout-adjusted': '调整灰度',
+  'approval-invalidated': '批准失效',
+  'restored-approved': '恢复批准版',
 }
 
 export function AuditPage() {
@@ -120,7 +122,7 @@ export function AuditPage() {
                 <TableCell>功能开关</TableCell>
                 <TableCell>变更说明</TableCell>
                 <TableCell>状态变化</TableCell>
-                <TableCell>影响用户</TableCell>
+                <TableCell>版本 / 影响用户</TableCell>
                 <TableCell align="right">操作</TableCell>
               </TableRow>
             </TableHead>
@@ -143,13 +145,18 @@ export function AuditPage() {
                     <TableCell>
                       <Chip size="small" variant="outlined" label={`${event.before || '-'} → ${event.after || '-'}`} />
                     </TableCell>
-                    <TableCell>{event.affectedUsers.toLocaleString()}</TableCell>
+                    <TableCell>
+                      <Stack spacing={0.5} alignItems="flex-start">
+                        {event.versionNumber ? <Chip size="small" color="primary" variant="outlined" label={`v${event.versionNumber}`} /> : <Typography variant="caption">-</Typography>}
+                        <Typography variant="body2">{event.affectedUsers.toLocaleString()}</Typography>
+                      </Stack>
+                    </TableCell>
                     <TableCell align="right">
                       <Button
                         size="small"
                         color="error"
                         startIcon={<UndoOutlinedIcon />}
-                        disabled={!relatedFlag || relatedFlag.status === 'rolled-back'}
+                        disabled={!relatedFlag || relatedFlag.runtimeStatus === 'rolled-back'}
                         onClick={() => {
                           setSelectedFlagId(event.flagId)
                           setReason('生产异常触发人工回滚，停止继续放量。')
@@ -172,7 +179,7 @@ export function AuditPage() {
       <Dialog open={Boolean(selectedFlag)} onClose={() => setSelectedFlagId('')} fullWidth maxWidth="sm">
         <DialogTitle>回滚 {selectedFlag?.name}</DialogTitle>
         <DialogContent dividers>
-          <Alert severity="error" sx={{ mb: 2 }}>回滚会关闭生产开关、停止灰度并写入审计日志。</Alert>
+          <Alert severity="error" sx={{ mb: 2 }}>紧急回滚会关闭生产开关并停止灰度；恢复已批准版本请在灰度页面操作。所有操作都会保留不可变审计轨迹。</Alert>
           <TextField
             label="回滚原因"
             multiline

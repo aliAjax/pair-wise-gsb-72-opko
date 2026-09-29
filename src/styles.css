@@ -311,7 +311,7 @@ a:hover {
 
 .attention-row {
   display: grid;
-  grid-template-columns: minmax(240px, 1fr) 70px 90px 90px;
+  grid-template-columns: minmax(220px, 1fr) 70px 90px 150px 90px;
   align-items: center;
   gap: 12px;
   min-height: 60px;
@@ -646,6 +646,41 @@ a:hover {
   grid-template-columns: minmax(0, 1fr) 40px;
   align-items: center;
   gap: 8px;
+}
+
+.version-snapshot {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.version-snapshot.compact {
+  grid-template-columns: 1fr;
+}
+
+.snapshot-section {
+  padding: 12px;
+  border: 1px solid #e5e6eb;
+  border-radius: 6px;
+  background: #f7f8fa;
+}
+
+.version-list {
+  display: grid;
+  gap: 8px;
+}
+
+.version-item {
+  width: 100%;
+  padding: 10px 12px !important;
+  border: 1px solid #e5e6eb;
+  border-radius: 6px;
+  text-align: left !important;
+}
+
+.version-item.selected {
+  border-color: #165dff;
+  background: #f2f7ff;
 }
 
 .audit-timeline {

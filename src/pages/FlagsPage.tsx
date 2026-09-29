@@ -29,6 +29,7 @@ import {
 } from '@/app/uiSlice'
 import { useGetFlagsQuery } from '@/services/flagApi'
 import { FlagStatusChip } from '@/components/FlagStatusChip'
+import { ConfigurationStateChip } from '@/components/ConfigurationStateChip'
 import type { Environment, FlagStatus } from '@/types'
 
 const teams = ['交易体验', '增长算法', '云控制台', '支付平台', '数据平台', '增长运营', '基础架构']
@@ -153,12 +154,15 @@ export function FlagsPage() {
                     <Stack spacing={0.6} alignItems="flex-start">
                       <Chip label={flag.environment.toUpperCase()} size="small" variant="outlined" />
                       <FlagStatusChip status={flag.status} />
+                      <ConfigurationStateChip state={flag.configurationState} />
                     </Stack>
                   </TableCell>
                   <TableCell>
-                    <Typography fontWeight={700}>{flag.rolloutPercentage}%</Typography>
+                    <Typography fontWeight={700} color={flag.configurationState === 'drifted' ? 'error.main' : undefined}>
+                      {flag.runtimePercentage ?? flag.rolloutPercentage}%
+                    </Typography>
                     <Typography variant="caption" color="text.secondary">
-                      最低客户端 {flag.minClientVersion[flag.environment]}
+                      送审 v{flag.reviewVersions.at(0)?.versionNumber ?? '-'} · 最低客户端 {flag.minClientVersion[flag.environment]}
                     </Typography>
                   </TableCell>
                   <TableCell>

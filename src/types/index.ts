@@ -32,6 +32,65 @@ export interface Dependency {
   condition: string
 }
 
+export interface ReleaseSnapshot {
+  key: string
+  name: string
+  description: string
+  owner: string
+  team: string
+  environment: Environment
+  enabled: boolean
+  rolloutPercentage: number
+  audienceRules: AudienceRule[]
+  regions: string[]
+  minClientVersion: Record<Environment, string>
+  dependencies: Dependency[]
+  rollbackConditions: string[]
+  metricNames: string[]
+  deadCodeStatus: 'clean' | 'candidate' | 'confirmed'
+  rolloutSteps: RolloutStep[]
+}
+
+export type ReviewVersionStatus =
+  | 'pending'
+  | 'approved'
+  | 'rejected'
+  | 'invalidated'
+  | 'superseded'
+  | 'restored'
+export type ReviewVersionSource = 'submission' | 'legacy-pending'
+
+export interface VersionChange {
+  field: keyof ReleaseSnapshot
+
+  label: string
+  before: string
+  after: string
+}
+
+export interface ReviewVersion {
+  id: string
+  flagId: string
+  versionNumber: number
+  source: ReviewVersionSource
+  status: ReviewVersionStatus
+  checksum: string
+  snapshot: ReleaseSnapshot
+  createdBy: string
+  createdAt: string
+  reviewedAt?: string
+  reviewer?: string
+  comment?: string
+  freezeUntil?: string
+  invalidatedAt?: string
+  invalidatedBy?: string
+  changes?: VersionChange[]
+  restoredAt?: string
+  restoredBy?: string
+}
+
+export type ConfigurationState = 'current' | 'drifted' | 'legacy-pending'
+
 export interface FeatureFlag {
   id: string
   key: string
@@ -51,6 +110,13 @@ export interface FeatureFlag {
   metricNames: string[]
   deadCodeStatus: 'clean' | 'candidate' | 'confirmed'
   rolloutSteps: RolloutStep[]
+  reviewVersions: ReviewVersion[]
+  approvedVersionId?: string
+  runtimeVersionId?: string
+  configurationState: ConfigurationState
+  runtimeStatus?: FlagStatus
+  runtimePercentage?: number
+  runtimeSteps?: RolloutStep[]
   createdAt: string
   updatedAt: string
   lastChangedBy: string
@@ -70,10 +136,14 @@ export interface AuditEvent {
     | 'unfrozen'
     | 'rolled-back'
     | 'rollout-adjusted'
+    | 'approval-invalidated'
+    | 'restored-approved'
   actor: string
   summary: string
   before?: string
   after?: string
+  versionId?: string
+  versionNumber?: number
   affectedUsers: number
   createdAt: string
 }
@@ -111,5 +181,6 @@ export interface ReviewPayload {
   reviewer: string
   decision: 'approved' | 'rejected'
   comment: string
+  versionId: string
   freezeUntil?: string
 }

@@ -4,7 +4,15 @@ import type {
   FeatureFlag,
   ImpactIssue,
   ReviewPayload,
+  ReviewVersion,
 } from '@/types'
+import {
+  calculateChecksum,
+  compareSnapshots,
+  createSnapshot,
+  getRuntimeVersion,
+  protectedFields,
+} from '@/services/releaseVersions'
 
 const STORAGE_KEY = 'feature-flag-release-console-v1'
 
@@ -14,7 +22,11 @@ export interface Database {
   issues: ImpactIssue[]
 }
 
-const flags: FeatureFlag[] = [
+const nowIso = () => new Date().toISOString()
+let auditSequence = 0
+const nextId = (prefix: string) => `${prefix}-${Date.now()}-${(auditSequence += 1)}`
+
+const legacyFlags = [
   {
     id: 'flag-101',
     key: 'checkout.express-pay-v2',
@@ -221,7 +233,7 @@ const flags: FeatureFlag[] = [
     updatedAt: '2026-09-29T09:10:00+08:00',
     lastChangedBy: '沈宁',
   },
-]
+] as const
 
 const issues: ImpactIssue[] = [
   {
@@ -367,7 +379,59 @@ const audit: AuditEvent[] = [
   },
 ]
 
-export const seedDatabase = (): Database => ({ flags, audit, issues })
+const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value)) as T
+
+const makeLegacyVersion = (flag: FeatureFlag): ReviewVersion => {
+  const snapshot = createSnapshot(flag)
+  return {
+    id: `version-${flag.id}-legacy-v1`,
+    flagId: flag.id,
+    versionNumber: 1,
+    source: 'legacy-pending',
+    status: 'pending',
+    checksum: calculateChecksum(snapshot),
+    snapshot,
+    createdBy: flag.lastChangedBy,
+    createdAt: flag.updatedAt,
+    comment: '旧开关首次打开时生成的待确认版本；原有审计记录保持不变。',
+  }
+}
+
+const normalizeLegacyFlag = (input: unknown): FeatureFlag => {
+  const legacy = input as Omit<FeatureFlag, 'reviewVersions' | 'configurationState'> &
+    Partial<Pick<FeatureFlag, 'reviewVersions' | 'configurationState'>>
+  const flag: FeatureFlag = {
+    ...clone(legacy),
+    reviewVersions: clone(legacy.reviewVersions ?? []),
+    configurationState: legacy.configurationState ?? 'current',
+  }
+  if (flag.reviewVersions.length === 0 && (flag.status !== 'draft' || flag.enabled || flag.rolloutPercentage > 0)) {
+    const version = makeLegacyVersion(flag)
+    flag.reviewVersions = [version]
+    const hasRuntime = flag.enabled || flag.rolloutPercentage > 0 || flag.rolloutSteps.some((step) => step.status !== 'planned')
+    if (hasRuntime) {
+      flag.runtimeVersionId = version.id
+      flag.runtimeStatus = flag.status
+      flag.runtimePercentage = flag.rolloutPercentage
+      flag.runtimeSteps = clone(flag.rolloutSteps)
+      flag.configurationState = 'legacy-pending'
+    }
+  }
+  return flag
+}
+
+const hydrateDatabase = (database: Partial<Database>): Database => ({
+  flags: (database.flags ?? []).map(normalizeLegacyFlag),
+  audit: database.audit ?? [],
+  issues: database.issues ?? [],
+})
+
+export const seedDatabase = (): Database =>
+  hydrateDatabase({
+    flags: clone(legacyFlags) as unknown as FeatureFlag[],
+    audit: clone(audit),
+    issues: clone(issues),
+  })
 
 export const readDatabase = (): Database => {
   const raw = localStorage.getItem(STORAGE_KEY)
@@ -377,7 +441,11 @@ export const readDatabase = (): Database => {
     return seed
   }
   try {
-    return JSON.parse(raw) as Database
+    const parsed = JSON.parse(raw) as Partial<Database>
+    const database = hydrateDatabase(parsed)
+    const needsMigration = JSON.stringify(database) !== raw
+    if (needsMigration) writeDatabase(database)
+    return database
   } catch {
     const seed = seedDatabase()
     writeDatabase(seed)
@@ -389,30 +457,428 @@ export const writeDatabase = (database: Database): void => {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(database))
 }
 
+const addAudit = (
+  db: Database,
+  event: Omit<AuditEvent, 'id' | 'createdAt'> & { createdAt?: string },
+): void => {
+  db.audit.unshift({
+    ...event,
+    id: nextId('audit'),
+    createdAt: event.createdAt ?? nowIso(),
+  })
+}
+
+const editableFields = {
+  copy: (source: FeatureFlag, target: FeatureFlag): FeatureFlag => ({
+    ...target,
+    key: source.key,
+    name: source.name,
+    description: source.description,
+    owner: source.owner,
+    team: source.team,
+    environment: source.environment,
+    rolloutPercentage: source.rolloutPercentage,
+    audienceRules: clone(source.audienceRules),
+    regions: clone(source.regions),
+    minClientVersion: clone(source.minClientVersion),
+    dependencies: clone(source.dependencies),
+    rollbackConditions: clone(source.rollbackConditions),
+    metricNames: clone(source.metricNames),
+    deadCodeStatus: source.deadCodeStatus,
+    rolloutSteps: clone(source.rolloutSteps),
+  }),
+}
+
+const runtimeStepsForSnapshot = (flag: FeatureFlag, runtimeStatus: FeatureFlag['status']) => {
+  const percentage = flag.runtimePercentage ?? flag.rolloutPercentage
+  const startedAt = nowIso()
+  return flag.rolloutSteps.map((step) => ({
+    ...step,
+    startedAt: step.percentage <= percentage ? startedAt : '',
+    status:
+      step.percentage < percentage
+        ? ('completed' as const)
+        : step.percentage === percentage
+          ? runtimeStatus === 'frozen'
+            ? ('paused' as const)
+            : ('running' as const)
+          : ('planned' as const),
+  }))
+}
+
+export const saveFlag = (input: FeatureFlag): FeatureFlag => {
+  const db = readDatabase()
+  const index = db.flags.findIndex((item) => item.id === input.id)
+  const timestamp = nowIso()
+
+  if (index < 0) {
+    const flag: FeatureFlag = {
+      ...editableFields.copy(input, input),
+      id: input.id,
+      status: 'draft',
+      enabled: false,
+      reviewVersions: [],
+      configurationState: 'current',
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      lastChangedBy: input.lastChangedBy || '林默',
+    }
+    db.flags.unshift(flag)
+    addAudit(db, {
+      flagId: flag.id,
+      flagKey: flag.key,
+      action: 'created',
+      actor: flag.lastChangedBy,
+      summary: '创建功能开关草稿。',
+      after: 'draft',
+      affectedUsers: 0,
+    })
+    writeDatabase(db)
+    return flag
+  }
+
+  const previous = db.flags[index]
+  const next = editableFields.copy(input, {
+    ...previous,
+    reviewVersions: clone(previous.reviewVersions),
+    approvedVersionId: previous.approvedVersionId,
+    runtimeVersionId: previous.runtimeVersionId,
+    configurationState: previous.configurationState,
+    runtimeStatus: previous.runtimeStatus,
+    runtimePercentage: previous.runtimePercentage,
+    runtimeSteps: clone(previous.runtimeSteps),
+    status: previous.status,
+    enabled: previous.enabled,
+    updatedAt: timestamp,
+    lastChangedBy: input.lastChangedBy || previous.lastChangedBy,
+  })
+
+  const runtimeVersion = getRuntimeVersion(next)
+  const latestVersion = next.reviewVersions.at(0)
+  const pendingVersion = latestVersion?.status === 'pending' ? latestVersion : undefined
+  const nextSnapshot = createSnapshot(next)
+  let configChanged = false
+
+  if (runtimeVersion && previous.configurationState !== 'drifted') {
+    const runtimeChanges = compareSnapshots(runtimeVersion.snapshot, nextSnapshot, protectedFields)
+    if (runtimeChanges.length > 0) {
+      const wasApproved = runtimeVersion.status === 'approved' || runtimeVersion.status === 'restored'
+      if (wasApproved) {
+        runtimeVersion.status = 'invalidated'
+        runtimeVersion.invalidatedAt = timestamp
+        runtimeVersion.invalidatedBy = next.lastChangedBy
+        runtimeVersion.changes = runtimeChanges
+      } else if (pendingVersion?.id === runtimeVersion.id) {
+        pendingVersion.status = 'superseded'
+      }
+      next.configurationState = 'drifted'
+      next.status = 'review'
+      next.enabled = false
+      next.runtimeStatus = previous.runtimeStatus ?? previous.status
+      next.runtimePercentage = previous.runtimePercentage ?? previous.rolloutPercentage
+      next.runtimeSteps = clone(previous.runtimeSteps ?? previous.rolloutSteps)
+      addAudit(db, {
+        flagId: next.id,
+        flagKey: next.key,
+        action: wasApproved ? 'approval-invalidated' : 'updated',
+        actor: next.lastChangedBy,
+        summary: wasApproved
+          ? `灰度开始后修改${runtimeChanges.map((change) => change.label).join('、')}，原批准立即失效并退回重审；运行流量保持 ${next.runtimePercentage}%。`
+          : `旧开关待确认版本发生${runtimeChanges.map((change) => change.label).join('、')}变化，原待确认版本已替代；运行流量保持 ${next.runtimePercentage}%。`,
+        before: wasApproved ? `v${runtimeVersion.versionNumber} 已批准` : `v${runtimeVersion.versionNumber} 待确认`,
+        after: '待重审',
+        versionId: runtimeVersion.id,
+        versionNumber: runtimeVersion.versionNumber,
+        affectedUsers: Math.round(900000 * ((next.runtimePercentage ?? 0) / 100)),
+      })
+      configChanged = true
+    }
+  }
+
+  if (!configChanged && pendingVersion) {
+    const pendingChanges = compareSnapshots(pendingVersion.snapshot, nextSnapshot, protectedFields)
+    if (pendingChanges.length > 0) {
+      pendingVersion.status = 'superseded'
+      next.status = 'draft'
+      next.enabled = false
+      addAudit(db, {
+        flagId: next.id,
+        flagKey: next.key,
+        action: 'updated',
+        actor: next.lastChangedBy,
+        summary: '送审版本保持不可变，草稿变化需重新提交评审。',
+        before: `v${pendingVersion.versionNumber} 待评审`,
+        after: '草稿',
+        versionId: pendingVersion.id,
+        versionNumber: pendingVersion.versionNumber,
+        affectedUsers: 0,
+      })
+      configChanged = true
+    }
+  }
+
+  if (!configChanged) {
+    addAudit(db, {
+      flagId: next.id,
+      flagKey: next.key,
+      action: 'updated',
+      actor: next.lastChangedBy,
+      summary: '更新开关草稿。',
+      before: previous.status,
+      after: next.status,
+      affectedUsers: Math.round(900000 * ((next.runtimePercentage ?? next.rolloutPercentage) / 100)),
+    })
+  }
+
+  db.flags[index] = next
+  writeDatabase(db)
+  return next
+}
+
+export const submitForReview = (flagId: string, actor: string): FeatureFlag => {
+  const db = readDatabase()
+  const flag = db.flags.find((item) => item.id === flagId)
+  if (!flag) throw new Error('功能开关不存在')
+
+  const timestamp = nowIso()
+  const previousVersion = flag.reviewVersions.at(0)
+  if (previousVersion?.status === 'pending') previousVersion.status = 'superseded'
+
+  const snapshot = createSnapshot(flag)
+  const versionNumber = flag.reviewVersions.reduce((max, version) => Math.max(max, version.versionNumber), 0) + 1
+  const version: ReviewVersion = {
+    id: `version-${flagId}-v${versionNumber}-${timestamp.slice(11, 19).replace(/:/g, '')}`,
+    flagId,
+    versionNumber,
+    source: 'submission',
+    status: 'pending',
+    checksum: calculateChecksum(snapshot),
+    snapshot,
+    createdBy: actor,
+    createdAt: timestamp,
+  }
+  flag.reviewVersions.unshift(version)
+  flag.status = 'review'
+  flag.enabled = false
+  flag.updatedAt = timestamp
+  flag.lastChangedBy = actor
+  addAudit(db, {
+    flagId,
+    flagKey: flag.key,
+    action: 'submitted',
+    actor,
+    summary: `固定送审版本 v${versionNumber}，记录受众、依赖与回滚边界。`,
+    before: previousVersion ? `v${previousVersion.versionNumber}` : 'draft',
+    after: `v${versionNumber} 待评审`,
+    versionId: version.id,
+    versionNumber,
+    affectedUsers: Math.round(900000 * ((flag.runtimePercentage ?? flag.rolloutPercentage) / 100)),
+  })
+  writeDatabase(db)
+  return flag
+}
+
 export const applyReview = (flagId: string, payload: ReviewPayload): FeatureFlag => {
   const db = readDatabase()
   const flag = db.flags.find((item) => item.id === flagId)
   if (!flag) throw new Error('功能开关不存在')
-  const before = flag.status
-  flag.status = payload.decision === 'approved' ? 'active' : 'draft'
-  flag.enabled = payload.decision === 'approved'
-  flag.updatedAt = new Date().toISOString()
+  const version = flag.reviewVersions.find((item) => item.id === payload.versionId)
+  if (!version) throw new Error('送审版本不存在')
+  if (flag.reviewVersions.at(0)?.id !== version.id) throw new Error('只能批准当前送审版本')
+  if (version.status !== 'pending') throw new Error('该版本已处理，请查看最新版本')
+
+  const timestamp = nowIso()
+  version.reviewedAt = timestamp
+  version.reviewer = payload.reviewer
+  version.comment = payload.comment
+  version.freezeUntil = payload.freezeUntil
+
+  const hadRuntime = Boolean(flag.runtimeVersionId)
+  const runtimeStatus: FeatureFlag['status'] = payload.freezeUntil ? 'frozen' : 'active'
+
+  if (payload.decision === 'rejected') {
+    version.status = 'rejected'
+    if (hadRuntime) {
+      flag.status = 'frozen'
+      flag.runtimeStatus = 'frozen'
+    } else {
+      flag.status = 'draft'
+      flag.enabled = false
+    }
+    flag.updatedAt = timestamp
+    flag.lastChangedBy = payload.reviewer
+    addAudit(db, {
+      flagId,
+      flagKey: flag.key,
+      action: 'rejected',
+      actor: payload.reviewer,
+      summary: payload.comment,
+      before: `v${version.versionNumber} 待评审`,
+      after: hadRuntime ? '运行流量冻结，待处理' : 'draft',
+      versionId: version.id,
+      versionNumber: version.versionNumber,
+      affectedUsers: Math.round(900000 * ((flag.runtimePercentage ?? 0) / 100)),
+    })
+    writeDatabase(db)
+    return flag
+  }
+
+  version.status = 'approved'
+  const previousPercentage = flag.runtimePercentage ?? version.snapshot.rolloutPercentage
+  flag.approvedVersionId = version.id
+  flag.runtimeVersionId = version.id
+  flag.runtimeStatus = runtimeStatus
+  flag.runtimePercentage = previousPercentage
+  Object.assign(flag, clone(version.snapshot))
+  flag.id = flagId
+  flag.reviewVersions = db.flags.find((item) => item.id === flagId)?.reviewVersions ?? flag.reviewVersions
+  flag.approvedVersionId = version.id
+  flag.runtimeVersionId = version.id
+  flag.runtimeStatus = runtimeStatus
+  flag.runtimePercentage = previousPercentage
+  flag.status = runtimeStatus
+  flag.enabled = true
+  flag.rolloutPercentage = previousPercentage
+  flag.rolloutSteps = runtimeStepsForSnapshot(flag, runtimeStatus)
+  flag.runtimeSteps = clone(flag.rolloutSteps)
+  flag.configurationState = 'current'
+  flag.updatedAt = timestamp
   flag.lastChangedBy = payload.reviewer
-  db.audit.unshift({
-    id: `audit-${Date.now()}`,
+
+  addAudit(db, {
     flagId,
     flagKey: flag.key,
-    action: payload.decision,
+    action: 'approved',
     actor: payload.reviewer,
-    summary: payload.comment,
-    before,
-    after: flag.status,
-    affectedUsers: Math.round(120000 * (flag.rolloutPercentage / 100)),
-    createdAt: new Date().toISOString(),
+    summary: `批准的是评审人看到的 v${version.versionNumber}（${version.checksum}）。${payload.comment}`,
+    before: hadRuntime ? `运行 ${previousPercentage}%` : 'review',
+    after: `${runtimeStatus} / ${previousPercentage}%`,
+    versionId: version.id,
+    versionNumber: version.versionNumber,
+    affectedUsers: Math.round(900000 * (previousPercentage / 100)),
   })
-  if (payload.freezeUntil && payload.decision === 'approved') {
-    flag.rollbackConditions.push(`冻结至 ${payload.freezeUntil}，期间禁止扩大流量`)
-  }
+  writeDatabase(db)
+  return flag
+}
+
+export const advanceRollout = (flagId: string, actor: string): FeatureFlag => {
+  const db = readDatabase()
+  const flag = db.flags.find((item) => item.id === flagId)
+  if (!flag) throw new Error('功能开关不存在')
+  if (flag.configurationState !== 'current') throw new Error('配置已变化，必须先完成重审或人工回滚')
+  if (flag.runtimeStatus !== 'active') throw new Error('只有运行中的灰度可以推进')
+  const runningIndex = (flag.runtimeSteps ?? []).findIndex((step) => step.status === 'running')
+  const nextStepIndex = runningIndex >= 0 ? runningIndex + 1 : 0
+  const nextStep = flag.runtimeSteps?.[nextStepIndex]
+  if (!nextStep) throw new Error('已经是最后一个灰度阶段')
+
+  const before = flag.rolloutPercentage
+  const timestamp = nowIso()
+  flag.runtimeSteps = (flag.runtimeSteps ?? []).map((step, index) => ({
+    ...step,
+    startedAt: index === nextStepIndex ? timestamp : step.startedAt,
+    status:
+      runningIndex >= 0 && index === runningIndex
+        ? ('completed' as const)
+        : index === nextStepIndex
+          ? ('running' as const)
+          : step.status,
+  }))
+  flag.rolloutSteps = clone(flag.runtimeSteps)
+  flag.runtimePercentage = nextStep.percentage
+  flag.rolloutPercentage = nextStep.percentage
+  flag.status = 'active'
+  flag.runtimeStatus = 'active'
+  flag.updatedAt = timestamp
+  flag.lastChangedBy = actor
+  addAudit(db, {
+    flagId,
+    flagKey: flag.key,
+    action: 'rollout-adjusted',
+    actor,
+    summary: `按已批准版本推进至 ${nextStep.percentage}%：${nextStep.audience}。`,
+    before: `${before}%`,
+    after: `${nextStep.percentage}%`,
+    versionId: flag.runtimeVersionId,
+    affectedUsers: Math.round(900000 * (nextStep.percentage / 100)),
+  })
+  writeDatabase(db)
+  return flag
+}
+
+export const freezeRollout = (flagId: string, actor: string): FeatureFlag => {
+  const db = readDatabase()
+  const flag = db.flags.find((item) => item.id === flagId)
+  if (!flag) throw new Error('功能开关不存在')
+  if (flag.configurationState !== 'current') throw new Error('配置已变化，不能按新草稿冻结，请先重审或回滚')
+  const before = flag.runtimeStatus
+  flag.runtimeStatus = 'frozen'
+  flag.status = 'frozen'
+  flag.rolloutSteps = (flag.runtimeSteps ?? flag.rolloutSteps).map((step) =>
+    step.status === 'running' ? { ...step, status: 'paused' } : step,
+  )
+  flag.runtimeSteps = clone(flag.rolloutSteps)
+  flag.updatedAt = nowIso()
+  flag.lastChangedBy = actor
+  addAudit(db, {
+    flagId,
+    flagKey: flag.key,
+    action: 'frozen',
+    actor,
+    summary: `冻结放量，运行流量停在 ${flag.runtimePercentage}%。`,
+    before,
+    after: 'frozen',
+    versionId: flag.runtimeVersionId,
+    affectedUsers: Math.round(900000 * ((flag.runtimePercentage ?? 0) / 100)),
+  })
+  writeDatabase(db)
+  return flag
+}
+
+export const restoreApprovedVersion = (flagId: string, actor: string, reason: string): FeatureFlag => {
+  const db = readDatabase()
+  const flag = db.flags.find((item) => item.id === flagId)
+  if (!flag) throw new Error('功能开关不存在')
+  if (flag.configurationState !== 'drifted') throw new Error('当前配置未偏离已批准版本')
+  const approved = flag.reviewVersions.find((version) => version.id === flag.approvedVersionId)
+  if (!approved) throw new Error('没有可恢复的已批准版本')
+
+  const timestamp = nowIso()
+  const pending = flag.reviewVersions.find((version) => version.status === 'pending')
+  if (pending) pending.status = 'superseded'
+  approved.status = 'restored'
+  approved.restoredAt = timestamp
+  approved.restoredBy = actor
+
+  const runtimePercentage = flag.runtimePercentage ?? approved.snapshot.rolloutPercentage
+  const runtimeStatus = flag.runtimeStatus ?? 'active'
+  Object.assign(flag, clone(approved.snapshot))
+  flag.id = flagId
+  flag.reviewVersions = db.flags.find((item) => item.id === flagId)?.reviewVersions ?? flag.reviewVersions
+  flag.approvedVersionId = approved.id
+  flag.runtimeVersionId = approved.id
+  flag.runtimeStatus = runtimeStatus
+  flag.runtimePercentage = runtimePercentage
+  flag.configurationState = 'current'
+  flag.status = runtimeStatus
+  flag.enabled = true
+  flag.rolloutPercentage = runtimePercentage
+  flag.rolloutSteps = clone(flag.runtimeSteps ?? [])
+  flag.updatedAt = timestamp
+  flag.lastChangedBy = actor
+
+  addAudit(db, {
+    flagId,
+    flagKey: flag.key,
+    action: 'restored-approved',
+    actor,
+    summary: `人工回滚恢复已批准版本 v${approved.versionNumber}，流量保持 ${runtimePercentage}%。${reason}`,
+    before: '配置漂移',
+    after: `v${approved.versionNumber} / ${runtimePercentage}%`,
+    versionId: approved.id,
+    versionNumber: approved.versionNumber,
+    affectedUsers: Math.round(900000 * (runtimePercentage / 100)),
+  })
   writeDatabase(db)
   return flag
 }
@@ -421,17 +887,22 @@ export const rollbackFlag = (flagId: string, actor: string, reason: string): Fea
   const db = readDatabase()
   const flag = db.flags.find((item) => item.id === flagId)
   if (!flag) throw new Error('功能开关不存在')
-  const before = `${flag.status} / ${flag.rolloutPercentage}%`
+  const before = `${flag.status} / ${flag.runtimePercentage ?? flag.rolloutPercentage}%`
+  const affectedUsers = Math.round(980000 * (((flag.runtimePercentage ?? flag.rolloutPercentage)) / 100))
+  const timestamp = nowIso()
   flag.status = 'rolled-back'
+  flag.runtimeStatus = 'rolled-back'
+  flag.configurationState = 'current'
   flag.enabled = false
   flag.rolloutPercentage = 0
-  flag.updatedAt = new Date().toISOString()
+  flag.runtimePercentage = 0
+  flag.updatedAt = timestamp
   flag.lastChangedBy = actor
-  flag.rolloutSteps.forEach((step) => {
-    if (step.status === 'running') step.status = 'paused'
-  })
-  db.audit.unshift({
-    id: `audit-${Date.now()}`,
+  flag.rolloutSteps = (flag.runtimeSteps ?? flag.rolloutSteps).map((step) =>
+    step.status === 'running' || step.status === 'paused' ? { ...step, status: 'paused' } : step,
+  )
+  flag.runtimeSteps = clone(flag.rolloutSteps)
+  addAudit(db, {
     flagId,
     flagKey: flag.key,
     action: 'rolled-back',
@@ -439,8 +910,8 @@ export const rollbackFlag = (flagId: string, actor: string, reason: string): Fea
     summary: reason,
     before,
     after: 'rolled-back / 0%',
-    affectedUsers: Math.round(980000 * (flag.rolloutPercentage / 100)),
-    createdAt: new Date().toISOString(),
+    versionId: flag.runtimeVersionId,
+    affectedUsers,
   })
   writeDatabase(db)
   return flag
@@ -449,8 +920,11 @@ export const rollbackFlag = (flagId: string, actor: string, reason: string): Fea
 export const getDashboardStats = (): DashboardData => {
   const db = readDatabase()
   return {
-    activeFlags: db.flags.filter((flag) => flag.enabled).length,
-    pendingReview: db.flags.filter((flag) => flag.status === 'review').length + 2,
+    activeFlags: db.flags.filter((flag) => flag.runtimeStatus === 'active' || (!flag.runtimeStatus && flag.enabled)).length,
+    pendingReview: db.flags.filter((flag) => {
+      if (flag.configurationState === 'drifted') return true
+      return flag.reviewVersions.at(0)?.status === 'pending'
+    }).length,
     blockerIssues: db.issues.filter((issue) => issue.severity === 'blocker' && !issue.resolved).length,
     affectedUsers: 5246900,
     environmentDiff: [

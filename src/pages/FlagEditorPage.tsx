@@ -28,6 +28,9 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useGetAuditQuery, useGetFlagQuery, useGetFlagsQuery, useSaveFlagMutation, useSubmitForReviewMutation } from '@/services/flagApi'
 import { FlagStatusChip } from '@/components/FlagStatusChip'
 import { DependencyGraph } from '@/components/DependencyGraph'
+import { ConfigurationStateChip } from '@/components/ConfigurationStateChip'
+import { VersionSnapshotPanel } from '@/components/VersionSnapshotPanel'
+import { getEffectiveFlag, getLatestVersion, getRuntimeVersion, getSnapshotChanges } from '@/services/releaseVersions'
 import type { AudienceRule, Dependency, FeatureFlag, RuleOperator, RolloutStep } from '@/types'
 
 const now = new Date().toISOString()
@@ -51,6 +54,8 @@ const emptyFlag = (): FeatureFlag => ({
   metricNames: [],
   deadCodeStatus: 'candidate',
   rolloutSteps: [],
+  reviewVersions: [],
+  configurationState: 'current',
   createdAt: now,
   updatedAt: now,
   lastChangedBy: '林默',
@@ -79,14 +84,38 @@ export function FlagEditorPage() {
   const { data: audit = [] } = useGetAuditQuery({ flagId: id ?? '' }, { skip: isNew })
   const [saveFlag, saveState] = useSaveFlagMutation()
   const [submitReview, submitState] = useSubmitForReviewMutation()
-  const activeFlag = savedFlag ?? draft
+  const storedFlag = savedFlag ?? draft
+  const activeFlag = getEffectiveFlag(storedFlag)
+  const latestVersion = getLatestVersion(activeFlag)
+  const runtimeVersion = getRuntimeVersion(storedFlag)
+  const draftChanges = getSnapshotChanges(runtimeVersion ?? latestVersion, {
+    key: storedFlag.key,
+    name: storedFlag.name,
+    description: storedFlag.description,
+    owner: storedFlag.owner,
+    team: storedFlag.team,
+    environment: storedFlag.environment,
+    enabled: storedFlag.enabled,
+    rolloutPercentage: storedFlag.rolloutPercentage,
+    audienceRules: storedFlag.audienceRules,
+    regions: storedFlag.regions,
+    minClientVersion: storedFlag.minClientVersion,
+    dependencies: storedFlag.dependencies,
+    rollbackConditions: storedFlag.rollbackConditions,
+    metricNames: storedFlag.metricNames,
+    deadCodeStatus: storedFlag.deadCodeStatus,
+    rolloutSteps: storedFlag.rolloutSteps,
+  })
+  const isDrifted = activeFlag.configurationState === 'drifted'
+  const isLegacyPending = activeFlag.configurationState === 'legacy-pending'
+  const hasPendingVersion = latestVersion?.status === 'pending'
 
   useEffect(() => {
     if (existing) setDraft(existing)
   }, [existing])
 
   const availableDependencies = useMemo(
-    () => allFlags.filter((flag) => flag.id !== activeFlag.id),
+    () => allFlags.map(getEffectiveFlag).filter((flag) => flag.id !== activeFlag.id),
     [activeFlag.id, allFlags],
   )
 
@@ -195,6 +224,7 @@ export function FlagEditorPage() {
           <Stack direction="row" spacing={1.2} alignItems="center">
             <Typography variant="h2">{isNew ? '创建功能开关' : activeFlag.name || '未命名开关'}</Typography>
             <FlagStatusChip status={activeFlag.status} />
+            <ConfigurationStateChip state={activeFlag.configurationState} />
           </Stack>
           <Typography color="text.secondary">
             {activeFlag.key || '尚未设置 Key'} · 最近更新 {activeFlag.updatedAt.slice(0, 16).replace('T', ' ')}
@@ -218,7 +248,7 @@ export function FlagEditorPage() {
             loading={submitState.isLoading}
             onClick={() => void handleSubmit()}
           >
-            提交影响评审
+            {isDrifted ? '重新送审当前草稿' : hasPendingVersion ? '固定为新版本送审' : '提交影响评审'}
           </Button>
         </Stack>
       </Box>
@@ -233,12 +263,31 @@ export function FlagEditorPage() {
         </Alert>
       )}
 
+      {isDrifted && (
+        <Alert severity="error" sx={{ mb: 2 }}>
+          当前草稿已修改灰度开始后的受众、依赖或回滚边界，v{runtimeVersion?.versionNumber} 的批准已失效；运行阶段仍停在原流量 {activeFlag.runtimePercentage}%。可人工回滚恢复已批准版本，或固定当前草稿重新送审。
+          {draftChanges.length > 0 && (
+            <Box component="ul" sx={{ m: 1, pl: 2 }}>
+              {draftChanges.map((change) => (
+                <li key={change.field}>{change.label}：{change.before} → {change.after}</li>
+              ))}
+            </Box>
+          )}
+        </Alert>
+      )}
+      {isLegacyPending && (
+        <Alert severity="warning" sx={{ mb: 2 }}>
+          旧开关首次打开已生成 v1 待确认版本，原审计记录保留；确认当前受众、依赖和回滚边界后请重新送审。
+        </Alert>
+      )}
+
       <Card>
         <Tabs value={tab} onChange={(_event, value: number) => setTab(value)} className="editor-tabs">
           <Tab label="基础信息" />
           <Tab label="受众规则" />
           <Tab label="依赖与兼容" />
           <Tab label="灰度与回滚" />
+          <Tab label="不可变版本" />
           <Tab label="审计记录" />
         </Tabs>
 
@@ -258,7 +307,7 @@ export function FlagEditorPage() {
                 <MenuItem value="staging">预发</MenuItem>
                 <MenuItem value="production">生产</MenuItem>
               </TextField>
-              <TextField select label="状态" value={draft.status} onChange={(event) => update('status', event.target.value as FeatureFlag['status'])}>
+              <TextField select label="状态（由评审流程驱动）" value={draft.status} disabled>
                 <MenuItem value="draft">草稿</MenuItem>
                 <MenuItem value="review">待评审</MenuItem>
                 <MenuItem value="active">已发布</MenuItem>
@@ -521,6 +570,22 @@ export function FlagEditorPage() {
         )}
 
         {tab === 4 && (
+          <CardContent className="editor-panel">
+            <Typography variant="h3" sx={{ mb: 2 }}>送审版本</Typography>
+            {activeFlag.reviewVersions.length === 0 && (
+              <Typography className="empty-state">尚未送审。点击“提交影响评审”会固定当前受众、依赖和回滚边界。</Typography>
+            )}
+            {activeFlag.reviewVersions.map((version) => (
+              <Card key={version.id} variant="outlined" sx={{ mb: 2 }}>
+                <CardContent>
+                  <VersionSnapshotPanel version={version} flags={allFlags} compact />
+                </CardContent>
+              </Card>
+            ))}
+          </CardContent>
+        )}
+
+        {tab === 5 && (
           <CardContent className="editor-panel">
             <Typography variant="h3" sx={{ mb: 2 }}>配置审计记录</Typography>
             <Box className="audit-timeline">

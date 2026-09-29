@@ -22,6 +22,7 @@ import DownloadOutlinedIcon from '@mui/icons-material/DownloadOutlined'
 import AssessmentOutlinedIcon from '@mui/icons-material/AssessmentOutlined'
 import { useGetAuditQuery, useGetDashboardQuery, useGetFlagsQuery, useGetIssuesQuery } from '@/services/flagApi'
 import { FlagStatusChip } from '@/components/FlagStatusChip'
+import { ConfigurationStateChip } from '@/components/ConfigurationStateChip'
 
 const escapeCsv = (value: string | number) => `"${String(value).replace(/"/g, '""')}"`
 
@@ -40,20 +41,23 @@ export function ReportsPage() {
 
   const exportReport = () => {
     const rows = [
-      ['开关Key', '名称', '环境', '状态', '灰度比例', '负责人', '团队', '受众规则', '依赖数', '监控指标', '回滚条件', '预计影响用户'],
+      ['开关Key', '名称', '环境', '状态', '配置状态', '批准版本', '版本校验和', '灰度比例', '负责人', '团队', '受众规则', '依赖数', '监控指标', '回滚条件', '预计影响用户'],
       ...reportFlags.map((flag) => [
         flag.key,
         flag.name,
         flag.environment,
         flag.status,
-        `${flag.rolloutPercentage}%`,
+        flag.configurationState,
+        flag.reviewVersions.find((version) => version.id === flag.approvedVersionId)?.versionNumber ?? '',
+        flag.reviewVersions.find((version) => version.id === flag.approvedVersionId)?.checksum ?? '',
+        `${flag.runtimePercentage ?? flag.rolloutPercentage}%`,
         flag.owner,
         flag.team,
         flag.audienceRules.length,
         flag.dependencies.length,
         flag.metricNames.join('|'),
         flag.rollbackConditions.join('|'),
-        Math.round(980000 * (flag.rolloutPercentage / 100)),
+        Math.round(980000 * ((flag.runtimePercentage ?? flag.rolloutPercentage) / 100)),
       ]),
     ]
     const csv = `\uFEFF${rows.map((row) => row.map(escapeCsv).join(',')).join('\n')}`
@@ -169,8 +173,9 @@ export function ReportsPage() {
                     <TableCell>
                       <Chip size="small" variant="outlined" label={flag.environment.toUpperCase()} />
                       <Box sx={{ mt: 0.5 }}><FlagStatusChip status={flag.status} /></Box>
+                      <Box sx={{ mt: 0.5 }}><ConfigurationStateChip state={flag.configurationState} /></Box>
                     </TableCell>
-                    <TableCell>{flag.rolloutPercentage}%</TableCell>
+                    <TableCell>{flag.runtimePercentage ?? flag.rolloutPercentage}%</TableCell>
                     <TableCell>{flag.audienceRules.length} 条规则 · {flag.regions.length} 地区</TableCell>
                     <TableCell>{flag.metricNames.length} 指标 · {flag.rollbackConditions.length} 回滚条件</TableCell>
                     <TableCell>
